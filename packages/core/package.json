@@ -1,6 +1,6 @@
 {
   "name": "@zhenre/core",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "@zhenre core — fine-grained signals, tagged-template DOM engine, anchored keyed lists, native Web Components, cleanup contexts. Zero dependencies, ~4KB.",
   "license": "MIT",
   "type": "module",

@@ -8,5 +8,3 @@ bench/results/
 # local secrets - never commit
 scripts/.ssh-backup/
 scripts/.npmrc-publish
-bench/re-020/
-*.tgz

@@ -32,7 +32,15 @@ export {
 } from './template.ts';
 export type { Slot, CompiledTemplate } from './template.ts';
 
-export { each, KeyedView, mountEach, mountList } from './each.ts';
+export {
+  each,
+  KeyedView,
+  mountEach,
+  mountList,
+  swapKeys,
+  removeKey,
+  refRow,
+} from './each.ts';
 export type { EachDirective, RowBatchFn, RowRender } from './each.ts';
 
 export { rowRenderer } from './factory.ts';

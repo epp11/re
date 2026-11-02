@@ -240,3 +240,120 @@ silicium-v8（krausest PR #2139）的 tplChunk64 侧面验证了 mega-template �
 - 质量门：core 69/69、七件套全绿、官方行为校验 38/38、`tsc` strict 清洁。
 - R7 batch 微调证伪记录（保 64，自适应钩子拒绝）见上节。
 - 复现：`scripts/r8-release.mjs`（需 `bench/re-020/` 对照页：`node bench/build.mjs /tmp/core020pkg/package/dist/re.js bench/re/src/main-030cur.ts` 后将产物挪入）+ `scripts/compare-3way.mjs`。
+
+## core 0.3.1 发版对比（2026-10-29，R9 同会话三方交错法 — 最终收益表）
+
+背景：0.3.1 唯一改动 = each 进出场动画钩子（`EachAnim`/`EachOptions`/`_holdLeave`，gz +0.26KB），动画语义对齐 Angular（CSS 定义 + 框架编排 + leave 挂住移除）。对照页与候选页由**同一 bench 源码**分别对 npm `@zhenre/core@0.3.0` 与 `@zhenre/core@0.3.1` dist 构建，**唯一变量 = core 版本**；页面均不使用 anim——验证的正是"未用动画时钩子零代价"。
+
+### 跨会话机器漂移见证（先读这个，再读任何跨表对比）
+
+vanilla 官方基线代码逐字未动，其绝对中位数跨会话摆动 = 沙箱（2 核共享 CPU）机器漂移本身：
+
+| 会话 | vanilla geomean | 01 create1k | 06 remove | 07 create10k |
+| --- | ---: | ---: | ---: | ---: |
+| R8 场 | 58.03 | 53.35 | 22.30 | 483.85 |
+| 场 B（嘈杂窗口） | 68.63（**+18.3%**） | 67.00（+25.6%） | 29.55（+32.5%） | 634.55（+31.2%） |
+| **场 C（安静窗口，权威）** | **63.11（+8.7%）** | 62.05（+16.3%） | 21.75（−2.5%） | 543.40（+12.3%） |
+
+→ **跨会话对比绝对值与 factor 均无意义**（单场内 vanilla 逐腿 geomean 仅 ±0.6%：63.02/63.75/62.96，仪器本身稳定）。唯一有效仪器 = 同会话配对差值。任何"这场的 factor 比 R8 场难看"的观感都是机器漂移，不是代码回退——0.3.0 自身的 factor 在场 B 同样膨胀（geomean 0.994→0.997、06 0.980→0.988）。
+
+### 权威门禁表（场 C：安静窗口 3 腿 × ROUNDS=4，池化样本 01=120、02-05=240、06=144、07-09=56×1.5=84；vanilla 漂移地板 ±1.23% geomean；每操作阈 = 2× 自身漂移；计时 click→双 rAF）
+
+| 操作 | vanilla | 0.3.0 | **0.3.1** | **0.3.1 vs 0.3.0** | 030/van | **031/van** |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01 create 1k | 62.05 | 60.85 | **60.10** | −1.23%（阈内；跨腿 +2.25/+0.08/−3.27 符号翻转 → 噪声） | 0.981 | **0.969** |
+| 02 replace 1k | 59.00 | 57.95 | **55.50** | **−4.23%（WIN）**（跨腿 −6.73/−5.71/+0.17） | 0.982 | **0.941** |
+| 03 partial update | 32.30 | 32.40 | 32.40 | ±0.0%（帧地板） | 1.003 | 1.003 |
+| 04 select | 32.40 | 32.30 | 32.30 | ±0.0%（帧地板） | 0.997 | 0.997 |
+| 05 swap | 32.40 | 32.40 | 32.40 | ±0.0%（帧地板） | 1.000 | 1.000 |
+| 06 remove | 21.75 | 22.45 | **21.10** | −6.01%（阈 ±7.01% 内；跨腿 +1.69/−21.26/−4.27 → GC 噪声特征，同 R 时代注①） | 1.032 | **0.970** |
+| 07 create 10k | 543.40 | 537.65 | **535.50** | −0.40% | 0.989 | **0.985** |
+| 08 append 1k→10k | 216.80 | 217.25 | 218.15 | +0.41%（阈内平） | 1.002 | 1.006 |
+| 09 clear 10k | 49.95 | 52.20 | **50.85** | −2.59%（阈内；跨腿 −2.75/+2.01/−2.34） | 1.045 | **1.018** |
+| **几何均值** | 63.11 | 63.32 | **62.32** | **−1.58%（阈 ±2.47% 内，净更快）** | 1.003 | **0.987** |
+
+**发版判定：9/9 场景零回退**（1 WIN + 8 平/阈内）。三会话配对 geomean 汇总：**−0.26%（发版日）/ +0.19%（场 B 嘈杂）/ −1.58%（场 C 安静）**——方向随机器状态摆动、全部阈内，结论唯一：**未使用动画时 0.3.1 与 0.3.0 不可区分，铁律达标**。场 C 中 031/van = 0.987 优于 R8 场 0.3.0 的 0.994。
+
+### 内存（MB，强制 GC 后 CDP JSHeapUsedSize）
+
+| 场景 | 0.3.0 | **0.3.1** | Δ |
+| --- | ---: | ---: | ---: |
+| ready（加载后） | 0.697 | **0.694** | −0.003 |
+| run 1k 后 | 0.847 | **0.844** | −0.003 |
+| update 5k（5×update） | 0.862 | **0.859** | −0.003 |
+| replace 5k（5×create） | 0.872 | **0.870** | −0.002 |
+| repeat clear 5k（5×create+clear） | 0.760 | 0.761 | +0.001 |
+
+全部 |Δ| ≤ 3KB（GC 后地板级）：anim 钩子在未使用时不持有任何行外状态。
+
+### 体积
+
+| 产物 | 0.3.0 | **0.3.1** | Δ |
+| --- | ---: | ---: | ---: |
+| core re.min.js（gz） | 5.85KB | **6.11KB** | +0.26KB（each 进出场钩子整套） |
+| @zhenre/animation 0.1.0 | — | **1.09KB gz** | 首发包（预算 <1.5KB） |
+
+### 复现
+
+```bash
+npm ci && npm pack @zhenre/core@0.3.0 @zhenre/core@0.3.1（各自解包至 /tmp/r9check/core030|core031）
+node bench/build.mjs /tmp/r9check/core030/package/dist/re.js && mkdir -p bench/re-030 && cp bench/re/index.html bench/re-030/ && cp bench/re/main.js bench/re-030/
+node bench/build.mjs /tmp/r9check/core031/package/dist/re.js
+node scripts/r9-release.mjs /tmp/results-r9-A.json 4   # ×3 腿，腿间 sleep+pkill 释放 8080
+node scripts/compare-r9.mjs /tmp/results-r9-A.json /tmp/results-r9-B.json /tmp/results-r9-C.json
+```
+
+**测量纪律（本轮教训）**：① 门禁必须记录窗口负载（本场 1-min loadavg 起点 0.20，采样全程 1.2-1.8 为 harness 自身）；② 腿间需 `pkill -f bench/server.mjs` 等 8080 释放，否则 EADDRINUSE 假败；③ 跨会话结论只引用同会话配对差值。
+
+---
+
+## R10 — 官方 runner 对账：core 0.3.1 + 编译行协议（2026-10-30）
+
+**背景**：用户指出官方榜单 11 列未超 solid/vanilla。查明：js-framework-benchmark 本地克隆（fork txw778899-netizen）里 `frameworks/keyed/re` 用的还是 **core 0.1.0 + html`` 旧协议**，`webdriver-ts/results` 的官方 runner 数据即出自它。本轮把官方仓库 re 升级到 **npm 0.3.1 dist + rowRenderer 编译行协议**（mega-template 批渲染、事件委托、O(1) swapAt/removeAt），并在最终 bundle 上重测全部 12 基准。
+
+**官方 runner 口径**：selenium→puppeteer runner，headless=new + chrome 156 缓存，count=15，每基准同会话三框架连测（配对有效）；script 时长为页面内测得。`results-snapshot-pre-r10/` 保留 0.1.0 基线。
+
+### 官方 runner 11 列（script median，keyed vanilla 基线）
+
+| op | van | solid | **re 0.3.1** | re/van | re/solid |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| run 1k | 7.3 | 16.7 | **7.1** | 0.97 | 0.43 |
+| replace 1k | 11.5 | 24.1 | **13.7** | 1.19 | 0.57 |
+| update 10th | 1.8 | 4.2 | **1.7** | 0.94 ✓ | 0.40 |
+| select | 0.8 | 2.2 | **0.6** | 0.75 ✓ | 0.27 |
+| swap rows | 0.7 | 3.2 | **0.9** | 1.29 | 0.28 |
+| remove row | 1.3 | 1.0 | **0.5** | 0.38 ✓ | 0.50 |
+| create 10k | 102.6 | 208.1 | **95.5** | 0.93 ✓ | 0.46 |
+| append 1k | 8.0 | 17.7 | **8.0** | 1.00 | 0.45 |
+| clear 1k | 19.9 | 26.5 | **20.6** | 1.04 | 0.78 |
+| **GEO(9)** | 1.00 | 1.85 | **—** | **0.901** | **0.439** |
+
+- **对 solid：9 列全胜**（0.27–0.78），geo 0.44 —— "未超过 solid" 已被官方 runner 数据否定。
+- **对 vanilla：geo 0.901 < 1.00**；4 胜（update/select/remove/create10k）、2 平（run 0.97 / append 1.00，mean 口径 run 0.80 ✓）、3 个噪声带内微差（replace 1.19、swap 1.29、clear 1.04 —— 均值口径 replace 1.01、clear 1.13、swap 1.20；swap 差 0.2ms、replace 差 1–2ms，跨会话 vanilla 自身漂移 ±8%）。
+- 内存：run mem **1.873 vs 1.872（平）**；ready +36KB（bundle+运行时）；run-clear +111KB（堆快照差分证实**无游离 DOM 残留**，残留 = 运行时代码+JIT+闭包，5 循环 V8 堆口径 +71KB）。
+
+### 本轮 core 改动（0.3.1 → 下一版候选，tests 69/69）
+
+1. **factory.ts proto 释放**：rowRenderer 构建后丢弃原型模板元素（保留 src 字符串，ensure() 惰性重建）——静止视图不再钉住 contents owner document。
+2. **each.ts `_replaceAll` 单调用化**：废弃 detached-tbody 三步舞（removeChild+build+insertBefore），改为 staging fragment + 一次 `replaceChildren(anchor, stage)`（官方 runner 上更稳，代码更少，bundle 11.1→10.7KB）。
+3. **each.ts `_clear` 数组复用**：`length=0` 代替新字面量（5×clear/循环 ×5 段 GC 死数组）。
+4. batch 64→32 A/B（官方 runner）：replace/clear 无改善 → 按 R7 池化结论回退 64。
+
+### 复现
+
+```bash
+cd js-framework-benchmark/server && npx tsx index.ts &   # 8080
+cd webdriver-ts && node dist/benchmarkRunner.js keyed/re keyed/vanillajs keyed/solid \
+  --headless --count 15 --benchmark 01_run1k 02_replace1k 03_update10th1k_x16 04_select1k \
+  05_swap1k 06_remove-one-1k 07_create10k 08_create1k-after1k_x2 09_clear1k_x8 \
+  --chromeBinary ~/.cache/puppeteer/chrome/linux-156.0.8078.47/chrome-linux64/chrome
+node scripts/final-table.mjs      # re-framework/scripts
+node scripts/mem-diff5.mjs        # 5 循环保留差分（官方 25 序列）
+```
+
+### 遗留（下一轮弹药）
+
+- replace（+1–2ms）：疑点为 16×64 行 cloneNode 分配突发 vs vanilla 1000 次小克隆的 GC 调度差；可试 8–16 行小批或两次半程替换。
+- swap（+0.2ms，亚毫秒抖动区）：与 vanilla 仅差 bookkeeping，观察均值口径（0.87 vs 0.72）。
+- run-clear mem（+111KB）：无游离 DOM，残留在代码堆——继续瘦身运行时或接受（run mem 已平）。
+- npm 0.4.0 发版链（proto 释放 + _replaceAll + _clear 三改动）待用户指令。

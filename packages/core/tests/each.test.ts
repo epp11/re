@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { setupDom } from './helpers/dom.ts';
 setupDom();
 
-const { html, append, each, signal } = await import('../src/index.ts');
+const { html, append, each, signal, mountList, refRow } = await import('../src/index.ts');
 
 interface Row {
   id: number;
@@ -287,6 +287,27 @@ test('mountEach: mounts immediately (lean embedding is live)', async () => {
   rows.value = mkRows(3); // signal subscription must already be live
   assert.deepEqual(texts(h), ['r1', 'r2', 'r3']);
   assert.equal(view.size, 3);
+});
+
+test('rehost: whole-subtree rehosting drops the ledger without DOM teardown', async () => {
+  const rows = signal(mkRows(5));
+  const h = host();
+  const view = mountList(h, rows, (r) => r.id, rowTpl);
+  assert.equal(h.children.length, 5); // comment anchor is not an element child
+  // build a fresh host and rehost into it (caller discards the old host wholesale)
+  const fresh = host();
+  const oldRows = Array.from(view.r);
+  view.rehost(fresh);
+  assert.equal(view.size, 0);
+  assert.equal(view.l.length, 0);
+  // anchor moved: fresh host ends with the comment anchor
+  assert.equal((fresh.lastChild as Comment).nodeType, 8);
+  // old host keeps its rows untouched (caller owns their lifecycle)
+  assert.equal(h.contains(oldRows[0] as Node), true);
+  // the view is live in the new host: append works there
+  rows.value = mkRows(2);
+  assert.equal(fresh.querySelectorAll('.row').length, 2);
+  assert.equal(h.querySelectorAll('.row').length, 5); // old host untouched
 });
 
 function el(tag: string, text?: string): HTMLElement {

@@ -52,8 +52,6 @@ let batching = false;
 let notifyDepth = 0;
 const queue = new Map<Sub, unknown>();
 
-const SIG: unique symbol = Symbol('re.signal');
-
 /**
  * Creation-context marker: when a view renders a row it sets `owner.current`;
  * signals created during that render are marked `_own` = context, letting
@@ -95,7 +93,6 @@ function notify(subs: Sub[], v: unknown): void {
  * per-cell reactive state at scale (10k+ cells).
  */
 class SignalImpl<T> implements Signal<T> {
-  [SIG]: number = 1;
   _own: object | null;
   _v: T;
   /** single-subscriber fast path (dominant case: one DOM binding) */
@@ -238,7 +235,6 @@ export function computed<T>(fn: () => T): Computed<T> {
       }
     },
   };
-  Object.defineProperty(me, SIG, { value: 1, enumerable: false });
   return me;
 }
 

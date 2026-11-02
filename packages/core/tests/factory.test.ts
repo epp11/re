@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { setupDom } from './helpers/dom.ts';
 setupDom();
 
-const { rowRenderer, mountList, signal } = await import('../src/index.ts');
+const { rowRenderer, mountList, signal, swapKeys, removeKey } = await import('../src/index.ts');
 const window = globalThis as unknown as Window & { document: Document };
 
 interface R {
@@ -113,14 +113,14 @@ test('mountList: end-to-end init/append/replace/clear/swap/remove', () => {
   equal((tb.children[0] as HTMLElement).textContent, '501r501');
 
   // swap O(1)
-  view.swap(501, 570);
+  swapKeys(view, 501, 570);
   equal((tb.children[0] as HTMLElement).textContent, '570r570');
   equal((tb.children[69] as HTMLElement).textContent, '501r501');
   equal(rows.peek()[0]!.id, 570);
   equal(rows.peek()[69]!.id, 501);
 
   // remove O(1)
-  view.remove(502);
+  removeKey(view, 502);
   equal(tb.children.length, 79);
   equal(rows.peek().length, 79);
   equal(rows.peek().some((r) => r.id === 502), false);

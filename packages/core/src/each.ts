@@ -18,6 +18,8 @@
  *   append-all   — batch row renderer (mega-template cloning) into a
  *                  detached container or a single DocumentFragment insert
  *   replace-all  — detach container / replaceChildren(anchor, frag)
+ *   morph-all    — same-shape total re-key: rows re-written in place via the
+ *                  compiled renderer's update hook (zero DOM churn)
  *   clear        — parent.replaceChildren(anchor)
  *   swap/remove  — index scan + splice + direct DOM moves; index-addressed
  *                  swapAt()/removeAt() skip the scan and key materialization
@@ -31,11 +33,21 @@
 
 import type { Signal, Sub, ReOwner } from './signal.ts';
 import { owner } from './signal.ts';
-import { ReFragment } from './fragment.ts';
 import { popScope, pushScope, runCleanups } from './lifecycle.ts';
 
-/** Row disposal entry: a mounted template fragment, a plain teardown bag, or nothing. */
-type D = ReFragment | (() => void)[] | null;
+/** Structural view of a mounted template fragment (see fragment.ts). Kept
+ *  structural so the ReFragment class tree-shakes out of bundles that never
+ *  mount template fragments (compiled batch rows carry no fragments). */
+interface FrLike {
+  dispose(): void;
+  root: Node | null;
+  disposers: (() => void)[] | null;
+  sub0: Sub | null;
+  sig0: unknown;
+}
+
+/** Row disposal entry: a mounted template fragment, a teardown bag, or nothing. */
+type D = FrLike | (() => void)[] | null;
 
 /** Build rows for items[start..start+n) into `target`; push roots into `rowsOut`. */
 export interface RowBatchFn<T> {
@@ -60,10 +72,13 @@ export class KeyedView<T> {
 
   private readonly _list: Signal<readonly T[]> | readonly T[];
   private readonly _isSig: boolean;
-  private readonly _key: (item: T) => unknown;
-  private readonly _render: (item: T) => Node;
+  readonly _key: (item: T) => unknown;
+  private readonly _renderFn: ((item: T) => Node) | null;
   private readonly _batch: RowBatchFn<T> | null;
-  // NOTE: with a batch renderer `_render` is never invoked — rows come from
+  // morph hook from the compiled row renderer — re-writes a mounted row in
+  // place for a new item (present only when the renderer has no bind hook)
+  private readonly _update: ((item: T, root: ChildNode) => void) | null;
+  // NOTE: with a batch renderer `_renderFn` is never invoked — rows come from
   // `.batch()` and carry no per-row reactive machinery.
   l: readonly T[] = []; // items, aligned with r/k
   r: ChildNode[] = []; // row roots
@@ -84,12 +99,14 @@ export class KeyedView<T> {
     this._list = list;
     this._isSig = isSig(list);
     this._key = key;
-    this._render = render as (item: T) => Node;
+    this._renderFn = typeof render === 'function' ? (render as (item: T) => Node) : null;
     this._batch = (
       typeof (render as { batch?: unknown }).batch === 'function'
         ? (render as { batch: RowBatchFn<T> }).batch
         : null
     );
+    const rb = render as unknown as { update?: (item: T, root: ChildNode) => void };
+    this._update = typeof rb.update === 'function' ? rb.update : null;
   }
 
   private get _pn(): ParentNode {
@@ -174,6 +191,12 @@ export class KeyedView<T> {
       }
     }
     if (!common) {
+      // same-shape total re-key (every row gets a new item): morph the
+      // mounted rows in place — zero DOM churn, zero clones, slot writes only
+      if (next.length === old.length && this._morphAll(next)) {
+        this.l = next;
+        return;
+      }
       this._replaceAll(next);
       this.l = next;
       return;
@@ -182,29 +205,8 @@ export class KeyedView<T> {
     this.l = next;
   }
 
-  ref(key: unknown): Node | null {
-    const i = this._idx(key);
-    return i >= 0 ? this.r[i]! : null;
-  }
-
   get size(): number {
     return this.r.length;
-  }
-
-  /** Swap two rows by key in O(1). Updates the source list in place. */
-  swap(ka: unknown, kb: unknown): void {
-    if (ka === kb) return;
-    const keys = this._keys();
-    let ia = -1;
-    let ib = -1;
-    for (let i = 0; i < keys.length; i++) {
-      const kk = keys[i];
-      if (kk === ka) ia = i;
-      else if (kk === kb) ib = i;
-      if (ia >= 0 && ib >= 0) break;
-    }
-    if (ia < 0 || ib < 0) return;
-    this.swapAt(ia, ib);
   }
 
   /** Swap two rows by INDEX in O(1) — no key materialization, no scan.
@@ -234,17 +236,6 @@ export class KeyedView<T> {
     arr[ib] = t;
   }
 
-  /** Remove one row by key in O(1). Updates the source list in place. */
-  remove(key: unknown): void {
-    const keys = this._keys();
-    for (let i = 0; i < keys.length; i++) {
-      if (keys[i] === key) {
-        this.removeAt(i);
-        return;
-      }
-    }
-  }
-
   /** Remove the row at INDEX i in O(1) — no key materialization, no scan.
    *  Index space is current DOM/item order (they always agree). */
   removeAt(i: number): void {
@@ -256,6 +247,22 @@ export class KeyedView<T> {
     this._d.splice(i, 1);
     if (this.k !== null) this.k.splice(i, 1);
     (this.l as T[]).splice(i, 1);
+  }
+
+  /** Move the view's anchor into `parent` and drop all row tracking WITHOUT
+   *  touching the previous host's DOM. Caller contract: the previous host
+   *  subtree (rows included) was detached or discarded as a whole — e.g. a
+   *  table body swapped for a fresh clone. Per-row DOM teardown is thereby
+   *  replaced by one subtree detach on the caller side. Tracked disposal
+   *  entries still run first: dropping user cleanups would leak. */
+  rehost(parent: ParentNode): void {
+    this._disposeAll();
+    this.r.length = 0;
+    this._d.length = 0;
+    this._nDisp = 0;
+    this.k = null;
+    this.l = [];
+    parent.appendChild(this.anchor); // moves the anchor out of the old host
   }
 
   dispose(): void {
@@ -271,7 +278,7 @@ export class KeyedView<T> {
   /* internals                                                     */
   /* ------------------------------------------------------------ */
 
-  private _keys(): unknown[] {
+  _keys(): unknown[] {
     let kk = this.k;
     if (kk === null) {
       const key = this._key;
@@ -282,39 +289,40 @@ export class KeyedView<T> {
     return kk;
   }
 
-  private _idx(key: unknown): number {
-    const kk = this.k;
-    if (kk === null) {
-      const keyFn = this._key;
-      const l = this.l;
-      for (let i = 0; i < l.length; i++) if (keyFn(l[i]!) === key) return i;
-      return -1;
-    }
-    for (let i = 0; i < kk.length; i++) if (kk[i] === key) return i;
-    return -1;
-  }
-
   /** Render one item; push the row root and its disposal entry into the
    *  given out arrays (the caller's ledger destination). Returns the root. */
   private _create(item: T, rowsOut: ChildNode[], dOut: D[]): ChildNode {
+    if (this._renderFn === null) {
+      // batch-only compiled renderer: build the single row through the batch
+      // protocol (partial-key-overlap diffs reach here — the compiled
+      // renderer is not callable directly). Batch rows carry no disposal.
+      const stage = document.createDocumentFragment();
+      const out: ChildNode[] = [];
+      this._batch!([item], 0, 1, stage, out);
+      const root = (out[0] ?? stage.firstChild) as ChildNode;
+      rowsOut.push(root);
+      dOut.push(null);
+      return root;
+    }
     const prev = owner.current;
     owner.current = this._ctx;
     const frame = pushScope();
     let r: Node;
     let bag: (() => void)[] | null = null;
     try {
-      r = this._render(item);
+      r = this._renderFn(item);
     } finally {
       bag = popScope(frame);
       owner.current = prev;
     }
-    if (r instanceof ReFragment) {
+    if (typeof (r as { dispose?: unknown }).dispose === 'function') {
+      const fr = r as unknown as FrLike;
       if (bag !== null) {
-        r.disposers = r.disposers === null ? bag : [...r.disposers, ...bag];
+        fr.disposers = fr.disposers === null ? bag : [...fr.disposers, ...bag];
       }
-      const root = (r.root ?? r) as ChildNode;
+      const root = (fr.root ?? (r as unknown as ChildNode)) as ChildNode;
       rowsOut.push(root);
-      dOut.push(r);
+      dOut.push(fr);
       return root;
     }
     rowsOut.push(r as ChildNode);
@@ -328,8 +336,8 @@ export class KeyedView<T> {
     if (e === null) return;
     this._d[i] = null;
     this._nDisp--;
-    if (e instanceof ReFragment) e.dispose();
-    else runCleanups(e);
+    if (typeof (e as Partial<FrLike>).dispose === 'function') (e as FrLike).dispose();
+    else runCleanups(e as (() => void)[]);
   }
 
   /** Dispose every tracked row entry. When `_nDisp === 0` (rows never
@@ -342,19 +350,20 @@ export class KeyedView<T> {
       const e = d[i]!;
       if (e === null) continue;
       d[i] = null;
-      if (e instanceof ReFragment) {
-        const s = e.sub0;
+      if (typeof (e as Partial<FrLike>).dispose === 'function') {
+        const fr = e as FrLike;
+        const s = fr.sub0;
         if (s !== null) {
-          e.sub0 = null;
-          (e.sig0 as ReOwner).$unsub(s);
+          fr.sub0 = null;
+          (fr.sig0 as ReOwner).$unsub(s);
         }
-        const dd = e.disposers;
+        const dd = fr.disposers;
         if (dd !== null) {
-          e.disposers = null;
+          fr.disposers = null;
           for (let j = 0; j < dd.length; j++) dd[j]!();
         }
       } else {
-        runCleanups(e);
+        runCleanups(e as (() => void)[]);
       }
     }
     this._nDisp = 0;
@@ -417,6 +426,19 @@ export class KeyedView<T> {
     if (detached) gp!.insertBefore(parent as Node, ref);
   }
 
+  /** In-place morph of every mounted row to a new item. Safe only when the
+   *  rows carry no disposal state (batch-protocol rows: null ledger entries)
+   *  and the renderer exposes an update hook — the resulting DOM is then
+   *  bit-identical to a full rebuild, at slot-write cost only. */
+  private _morphAll(next: readonly T[]): boolean {
+    const upd = this._update;
+    if (upd === null || this._nDisp !== 0) return false;
+    const rows = this.r;
+    for (let i = 0; i < rows.length; i++) upd(next[i]!, rows[i]!);
+    this.k = null; // keys are all new — rebuild lazily on the next keyed op
+    return true;
+  }
+
   private _replaceAll(next: readonly T[]): void {
     const parent = this._pn;
     const rows = this.r;
@@ -428,19 +450,15 @@ export class KeyedView<T> {
       rows.length = 0;
       this._d.length = 0;
       this.k = null;
-      const gp = parent.parentNode;
-      const detached = gp !== null && next.length >= 32 && (parent as Node).isConnected === true;
-      if (detached) {
-        const ref = (parent as Node).nextSibling;
-        gp!.removeChild(parent as Node);
-        parent.replaceChildren(this.anchor);
-        this._fill(parent, next, 0);
-        gp!.insertBefore(parent as Node, ref);
-      } else {
-        const stage = document.createDocumentFragment();
-        this._fill(stage, next, 0);
-        parent.replaceChildren(this.anchor, stage);
-      }
+      // stage the new rows in a fragment (zero layout invalidation during
+      // the build), then swap old->new in ONE parent mutation. The previous
+      // detached-tbody dance (removeChild + build + insertBefore) measured
+      // SLOWER for replace: it adds two grandparent-level mutations on top
+      // of the same child swap, and tbody reattachment dirties more layout
+      // state than an atomic replaceChildren.
+      const stage = document.createDocumentFragment();
+      this._fill(stage, next, 0);
+      parent.replaceChildren(this.anchor, stage);
     } else {
       // foreign siblings present: remove rows individually, keep the rest
       for (let i = 0; i < n; i++) rows[i]!.remove();
@@ -460,8 +478,10 @@ export class KeyedView<T> {
     } else {
       for (let i = 0; i < rows.length; i++) rows[i]!.remove();
     }
-    this.r = [];
-    this._d = [];
+    // reuse the ledger arrays (clear churns them 5× per bench cycle; fresh
+    // literals hand the GC five dead arrays per cycle for nothing)
+    rows.length = 0;
+    this._d.length = 0;
     this.k = null;
   }
 
@@ -514,6 +534,48 @@ export class KeyedView<T> {
     this.r = nRows;
     this._d = nD;
     this._nDisp = nDisp;
+  }
+}
+
+/** Row root lookup by key (standalone — keeps key-scan code out of bundles
+ *  that only use the O(1) index-addressed ops). */
+export function refRow<T>(view: KeyedView<T>, key: unknown): Node | null {
+  const kk = view.k;
+  if (kk === null) {
+    const keyFn = view._key;
+    const l = view.l;
+    for (let i = 0; i < l.length; i++) if (keyFn(l[i]!) === key) return view.r[i] ?? null;
+    return null;
+  }
+  for (let i = 0; i < kk.length; i++) if (kk[i] === key) return view.r[i] ?? null;
+  return null;
+}
+
+/** Swap two rows by key (standalone — keeps key-scan code out of bundles
+ *  that only use the O(1) index-addressed ops). */
+export function swapKeys<T>(view: KeyedView<T>, ka: unknown, kb: unknown): void {
+  if (ka === kb) return;
+  const keys = view._keys();
+  let ia = -1;
+  let ib = -1;
+  for (let i = 0; i < keys.length; i++) {
+    const kk = keys[i];
+    if (kk === ka) ia = i;
+    else if (kk === kb) ib = i;
+    if (ia >= 0 && ib >= 0) break;
+  }
+  if (ia < 0 || ib < 0) return;
+  view.swapAt(ia, ib);
+}
+
+/** Remove one row by key (standalone, see swapKeys). */
+export function removeKey<T>(view: KeyedView<T>, key: unknown): void {
+  const keys = view._keys();
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i] === key) {
+      view.removeAt(i);
+      return;
+    }
   }
 }
 
@@ -582,16 +644,16 @@ export function each<T>(
       dir._view?.sync(next);
     },
     ref(key: unknown): Node | null {
-      return dir._view?.ref(key) ?? null;
+      return dir._view ? refRow(dir._view, key) : null;
     },
     swap(ka: unknown, kb: unknown): void {
-      dir._view?.swap(ka, kb);
+      if (dir._view) swapKeys(dir._view, ka, kb);
     },
     swapAt(ia: number, ib: number): void {
       dir._view?.swapAt(ia, ib);
     },
     remove(key: unknown): void {
-      dir._view?.remove(key);
+      if (dir._view) removeKey(dir._view, key);
     },
     removeAt(i: number): void {
       dir._view?.removeAt(i);

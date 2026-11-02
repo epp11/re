@@ -6,6 +6,9 @@
  * paths to its dynamic text slots. The engine detects `.batch()` and builds
  * rows in staging batches:
  *
+ *   - the prototype row is parsed lazily (first batch) and released after
+ *     every build; context-parsable tags (TR, TD, OPTION, …) skip the
+ *     <template> element entirely — no contents-owner-document pinning
  *   - a staging fragment holding `batch` (default 50) rows is built lazily
  *     once and reused for every build (a plain fragment — no template
  *     element, no contents-owner-document cost)
@@ -46,6 +49,11 @@ export interface CompiledRowRenderer<T> {
      *  per-row roots loop is skipped entirely. */
     rowsOut?: ChildNode[] | null,
   ): void;
+  /** Re-write one already-mounted row in place for a NEW item — used by the
+   *  keyed view's morph fast path (no-common-keys, same shape). Resolves the
+   *  row's slot paths on the live root and re-runs `values`. Only present
+   *  when the renderer carries no `bind` hook (bind state cannot morph). */
+  update?(item: T, root: ChildNode): void;
 }
 
 function resolve(root: Node, path: number[]): Text {
@@ -64,6 +72,16 @@ function resolve(root: Node, path: number[]): Text {
   return n as Text;
 }
 
+/** HTML tags whose parsing is context-sensitive: the element the row HTML
+ *  must be parsed INSIDE to recover the tag (innerHTML fragment parsing).
+ *  Covers every row template tag a compiler emits; anything else falls back
+ *  to a <template> element (whose content document never leaks — see below). */
+const CTX: Record<string, string> = {
+  TR: 'tbody', TD: 'tr', TH: 'tr', THEAD: 'thead', TBODY: 'tbody',
+  TFOOT: 'tfoot', CAPTION: 'table', COLGROUP: 'colgroup', COL: 'colgroup',
+  OPTION: 'select', OPTGROUP: 'select',
+};
+
 export function rowRenderer<T>(
   src: string,
   paths: number[][],
@@ -73,28 +91,55 @@ export function rowRenderer<T>(
   const values = opts?.values;
   const bind = opts?.bind;
 
+  // The prototype row is build-time machinery: once the staging fragment
+  // exists, it carries zero information that `src` cannot rebuild. The
+  // closure releases it after every build so a resting view retains ONLY the
+  // source string. For context-parsable tags (TR, TD, OPTION, …) the row is
+  // created directly in the host document — no <template> element, no
+  // template contents owner document (each of those pins its own window /
+  // registry structures and measurably leaks a few KB per created template).
+  // User-provided templates are kept intact (their content is not mutated).
   const given = opts?.template;
-  const proto = given ?? document.createElement('template');
-  if (given === undefined) {
-    proto.innerHTML = src;
-    // engines that mangle row HTML inside <template> (happy-dom recovers
-    // `<tr>` into `<a>`): reparse in a table context when the root does not
-    // match
-    const want = (/^\s*<([a-zA-Z]+)/.exec(src)?.[1] ?? '').toUpperCase();
-    const got = proto.content.firstElementChild as Element | null | undefined;
-    if (got == null || got.tagName !== want) {
-      while (proto.content.firstChild !== null) proto.content.firstChild.remove();
-      const h = document.createElement(want === 'TR' ? 'table' : 'div');
-      h.innerHTML = want === 'TR' ? '<tbody>' + src + '</tbody>' : src;
-      const row = (want === 'TR' ? (h.firstElementChild as HTMLElement | null)?.firstElementChild : h.firstElementChild) as Node | null | undefined;
-      if (row != null) proto.content.appendChild(row);
+  let protoRow: ChildNode | null = null;   // the row to clone
+  let holder: DocumentFragment | null = null; // keeps protoRow alive (given.content or a plain fragment)
+  function buildProto(): void {
+    protoRow = null;
+    holder = null;
+    if (given !== undefined) {
+      const row = given.content.firstElementChild as ChildNode | null;
+      if (row !== null) {
+        protoRow = row;
+        holder = given.content;
+      }
+    } else {
+      const want = (/^\s*<([a-zA-Z]+)/.exec(src)?.[1] ?? '').toUpperCase();
+      const ctx = CTX[want];
+      if (ctx !== undefined) {
+        const h = document.createElement(ctx);
+        h.innerHTML = src;
+        const row = h.firstElementChild as Element | null;
+        if (row !== null && row.tagName === want) {
+          holder = document.createDocumentFragment();
+          holder.appendChild(row);
+          protoRow = holder.firstChild as ChildNode;
+        }
+      }
+      if (protoRow === null) {
+        // template fallback: unknown/context-sensitive tags or a parse the
+        // context element rejected. Template content documents are inert and
+        // unreferenced after the build (the proto row is released below), so
+        // nothing leaks.
+        const t = document.createElement('template');
+        t.innerHTML = src;
+        holder = t.content;
+        protoRow = holder.firstElementChild as ChildNode | null;
+      }
     }
-  }
-  // Ensure every slot path ends on a real Text node: HTML sources like
-  // `<td></td>` have no text child, but slot paths address one. Insert empty
-  // text nodes where missing (idempotent; runs once before mega build).
-  {
-    const root = proto.content.firstElementChild!;
+    if (protoRow === null) return;
+    // Ensure every slot path ends on a real Text node: HTML sources like
+    // `<td></td>` have no text child, but slot paths address one. Insert empty
+    // text nodes where missing (idempotent; runs once per proto build).
+    const root = protoRow;
     for (const p of paths) {
       let n: Node = root;
       for (let i = 0; i < p.length - 1; i++) {
@@ -123,8 +168,10 @@ export function rowRenderer<T>(
       }
     }
   }
+  // proto build is LAZY: a view created but never rendered (or rendered only
+  // after page-ready memory probes) retains nothing but the source string
 
-  // Staging fragment: B rows cloned from the proto, plus per-row hot
+  // Staging fragment: B rows cloned from the proto row, plus per-row hot
   // text-slot arrays. Built lazily on the first batch and REUSED for every
   // later build.
   //
@@ -139,7 +186,8 @@ export function rowRenderer<T>(
   let stageTexts: Text[][] | null = null;
   function ensure(): void {
     if (stage !== null) return;
-    const row = proto.content.firstElementChild!;
+    if (protoRow === null) buildProto();
+    const row = protoRow!;
     const frag = document.createDocumentFragment();
     const kids: ChildNode[] = new Array(B);
     for (let i = 0; i < B; i++) {
@@ -162,6 +210,18 @@ export function rowRenderer<T>(
   const scratch: Text[] = new Array(paths.length);
 
   return {
+    // morph hook: in-place re-write of an already-mounted row for a new
+    // item. Absent when a bind hook exists — bind-registered state (event
+    // listeners, expandos) cannot survive an item swap.
+    ...(bind === undefined && values !== undefined
+      ? {
+          update(item: T, root: ChildNode): void {
+            for (let s = 0; s < paths.length; s++) scratch[s] = resolve(root, paths[s]!);
+            values(item, scratch);
+            for (let s = 0; s < paths.length; s++) scratch[s] = undefined!;
+          },
+        }
+      : {}),
     batch(items, start, n, target, rowsOut): void {
       if (n <= 0) return;
       ensure();
@@ -199,6 +259,12 @@ export function rowRenderer<T>(
       // warm rebuild cost is smaller than the retained-subtree overhead.)
       stage = null;
       stageTexts = null;
+      // release the prototype row too: a resting view retains only `src`
+      // (user-provided templates stay with their owner)
+      if (given === undefined) {
+        protoRow = null;
+        holder = null;
+      }
     },
   };
 }
