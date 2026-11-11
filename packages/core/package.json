@@ -1,6 +1,6 @@
 {
   "name": "@zhenre/core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "@zhenre core — fine-grained signals, tagged-template DOM engine, anchored keyed lists, native Web Components, cleanup contexts. Zero dependencies, ~4KB.",
   "license": "MIT",
   "type": "module",
@@ -18,7 +18,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/re.js && esbuild src/index.ts --bundle --format=esm --minify --outfile=dist/re.min.js && tsc -p tsconfig.build.json",
+    "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/re.js && esbuild src/index.ts --bundle --format=esm --minify --outfile=dist/re.min.js && terser dist/re.min.js --compress passes=3,unsafe_arrows=true,unsafe=true,unsafe_math=true --mangle --format indent_level=0,comments=false -o dist/re.min.js && tsc -p tsconfig.build.json",
     "test": "node --test tests/*.test.ts"
   }
 }

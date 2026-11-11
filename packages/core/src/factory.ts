@@ -56,19 +56,21 @@ export interface CompiledRowRenderer<T> {
   update?(item: T, root: ChildNode): void;
 }
 
-function resolve(root: Node, path: number[]): Text {
-  // walk by sibling chain (never touches childNodes — caching a live
-  // NodeList per container would pin NodeListsNodeData on staging rows)
-  let n: Node = root;
-  for (let i = 0; i < path.length; i++) {
-    let k = path[i]!;
-    let c = n.firstChild;
-    while (k > 0 && c !== null) {
-      c = c.nextSibling;
-      k--;
-    }
-    n = c!;
+/** k-th child of `n` via the sibling chain. Shared by resolve() and the
+ * proto path repair — never touches childNodes (caching a live NodeList
+ * per container would pin NodeListsNodeData on staging rows). */
+function nth(n: Node, k: number): Node | null {
+  let c = n.firstChild;
+  while (k > 0 && c !== null) {
+    c = c.nextSibling;
+    k--;
   }
+  return c;
+}
+
+function resolve(root: Node, path: number[]): Text {
+  let n: Node = root;
+  for (let i = 0; i < path.length; i++) n = nth(n, path[i]!)!;
   return n as Text;
 }
 
@@ -142,15 +144,7 @@ export function rowRenderer<T>(
     const root = protoRow;
     for (const p of paths) {
       let n: Node = root;
-      for (let i = 0; i < p.length - 1; i++) {
-        let k = p[i]!;
-        let c = n.firstChild;
-        while (k > 0 && c !== null) {
-          c = c.nextSibling;
-          k--;
-        }
-        n = c!;
-      }
+      for (let i = 0; i < p.length - 1; i++) n = nth(n, p[i]!)!;
       const last = p[p.length - 1]!;
       let c = n.firstChild;
       let idx = 0;

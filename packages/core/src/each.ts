@@ -137,11 +137,14 @@ export class KeyedView<T> {
       };
       (this._list as Signal<readonly T[]>).$sub(this._sub);
     }
-    this.sync(
-      this._isSig
-        ? (this._list as Signal<readonly T[]>).peek()
-        : (this._list as readonly T[]),
-    );
+    // An EMPTY initial list skips sync() entirely — zero DOM ops before
+    // first paint (benchmark 43 loads with []; sync([]) would issue a
+    // container replaceChildren for nothing). `l` already defaults to [],
+    // so the first real sync still takes the clean _appendAll path.
+    const init = this._isSig
+      ? (this._list as Signal<readonly T[]>).peek()
+      : (this._list as readonly T[]);
+    if (init.length !== 0) this.sync(init);
   }
 
   sync(next: readonly T[]): void {

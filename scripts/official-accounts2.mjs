@@ -8,7 +8,7 @@ const FWS = [
   ['vanillajs', 'van'],
   ['solid-v1.9.3', 'solid'],
   ['thane-v0.2.0', 'thane'],
-  ['re-v0.4.0', 're'],
+  ['re-v0.5.0', 're'],
 ];
 const SPEED = [
   ['01_run1k', 'create rows 1k', 'run 1k'],
@@ -119,7 +119,7 @@ console.log('\n── SIZE / PAINT — values.DEFAULT.median (lower is better) �
 let sw = 0, sl = 0;
 for (const t of table.filter((x) => x.kind === 'size')) {
   const { m } = t;
-  const v = FWS.filter(([fw]) => fw !== 're-v0.4.0').map(([, n]) => m[n]).map((o) => m.re < o);
+  const v = FWS.filter(([fw]) => fw !== 're-v0.5.0').map(([, n]) => m[n]).map((o) => m.re < o);
   sw += v.filter(Boolean).length; sl += v.filter((x) => !x).length;
   console.log(
     t.short.padEnd(32),
